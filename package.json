@@ -1,0 +1,18 @@
+{
+  "name": "ml2440-to-signalk",
+  "version": "1.0.0",
+  "description": "SignalK node server plugin that reads data from one or more ML2440 MPPT Charger(s)",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "signalk-node-server-plugin"
+  ],
+  "author": "gary.smith.rsa@gmail.com",
+  "license": "ISC",
+  "dependencies": {
+    "modbus-serial": "^7.6.0"
+  },
+  "repository": "https://github.com/GaryWSmith/ml2440-to-signalk"
+}
