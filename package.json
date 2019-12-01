@@ -1,7 +1,7 @@
 {
-  "name": "ml2440-to-signalk",
+  "name": "srne-to-signalk",
   "version": "1.0.0",
-  "description": "SignalK node server plugin that reads data from one or more ML2440 MPPT Charger(s)",
+  "description": "SignalK node server plugin that reads data from one or more SRNE MPPT Charger(s)",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
