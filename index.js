@@ -14,11 +14,21 @@
  * limitations under the License.
  */
 
+/*
+30/07/21
+Changed the battery check period to 120s. 1) The rolling average voltage needs time to drop
+or the routine sets to float twice in short succession but also to not keep trying too often 
+when another charger is controlling the battery voltage.
+
+
+Remmed out most of the debug statements - left the catch debug ones
+
+Remember to sleep(1000) after every writeregisters to save on lots of heartache!!!
+*/
+
 const PLUGIN_ID = 'srne-to-signalk';
 const _ = require("lodash");
 var ModbusRTU = require("modbus-serial");
-
-
 
 module.exports = function(app) {
   const plugin = {};
@@ -26,265 +36,279 @@ module.exports = function(app) {
 
   var getDelta = require('./parser.js');
 
-
   plugin.id = PLUGIN_ID
   plugin.name = "SRNE MPPT Manager & Logger"
-  plugin.description = "SignalK node server plugin that reads data from one or more ML24xx MPPT Charger(s)"
+  plugin.description = "SignalK node server plugin that reads data from and controls one or more ML24xx MPPT Charger(s)"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   plugin.start = function(options, restartPlugin) {
 
-  // call restartPlugin() if required
 
-    const timeout = 			          900;
+    const timeout = 			        900;
 
-    const eepromBaseAddr =		      0xe001;
+    const eepromBaseAddr =		      	0xe001;
     const absVoltAddr = 		        0xe008;
-    const load_on_offAddr = 		    0x010a;
+    const load_on_offAddr = 		    	0x010a;
     const readAddress = 		        0x0100;  //dynamic information
 
-    const batteryCapacity=		      options.batteryCapacity;
+    const batteryCapacity=		      	options.batteryCapacity;
     const tailCurrent = 		        options.tailCurrent;
     const tailDuration = 		        options.tailDuration * 60;
     const batteryAbsVoltage = 			options.batteryAbsVoltage;
-    const floatResetVoltage = 		  options.floatResetVoltage;
-    const inFloatMode =             false;
+    const floatResetVoltage = 		  	options.floatResetVoltage;
 
-    const systemVoltage = 		      3084;
+    const systemVoltage = 		      	3084;
     const batteryType = 		        0;
-    const overVoltageThreshold = 	  160;
-    const chargingVoltageLimit = 	  158;
-    const overDischargeRecVoltage = 126;
-    const underVoltageWarning = 	  123;
-    const overDischargeVoltage = 	  112;
-    const dischargeLimitVoltage = 	110;
-    const SoCValue = 			          25650;
-    const overDischargeTimeDelay = 	5; //seconds
-    const tempComp = 			          0;
+    const overVoltageThreshold = 	  	155;
+    const chargingVoltageLimit = 	  	155;
+    const overDischargeRecVoltage = 		126;
+    const underVoltageWarning = 	  	123;
+    const overDischargeVoltage = 	  	112;
+    const dischargeLimitVoltage = 		110;
+    const SoCValue = 			        25650;
+    const overDischargeTimeDelay = 		5; //seconds
+    const tempComp = 			        0;
 
-    const battStateCheckInterval = 	10000;
+    const battStateCheckInterval = 		120000;
 
     var maxReadErrCnt = 		        10;
 
-    var tailCurrentTotal = 		      0;
-    var tailCurrentAve =            0;
-    var tailVoltageTotal = 		      0;
-    var tailVoltageAve =            0;
 
-    arrSize =                       tailDuration; // assumes 1s sample interval
-    currentArr =                    [];
-    voltageArr =                    [];
+    var inFloatMode =             		false;
+    var tailCurrentTotal = 		      	0;
+    var tailCurrentAve =            		0;
+    var tailVoltageTotal = 		      	0;
+    var tailVoltageAve =            		0;
 
-    plugin.clientList =             [];
+    arrSize =                       		tailDuration; // assumes 1s sample interval
+    currentArr =                    		[];
+    voltageArr =                    		[];
+
+    plugin.clientList =             		[];
 
     let devices = options.devices
     devices.forEach(device => {
-      const client = 			          new ModbusRTU();
-      const ttyId = 			          device.ttyId;
+      const client = 			        new ModbusRTU();
+      const ttyId = 			        device.ttyId;
       const ttyDevice = 		        device.ttyDevice;
-      const equalisationVoltage =  	device.equalisationVoltage;
-      const absorptionVoltage =    	device.absorptionVoltage;
-      const floatVoltage = 		      device.floatVoltage;
-      const bulkRecVoltage = 		    device.recoveryVoltage;
-      const equalisationTime = 		  device.equalisationTime;
-      const absorptionTime = 		    device.absorptionTime;
-      const equalisationInterval = 	device.equalisationInterval;
-      const tempFanOn = 		        device.fanTempOn + 273;
-      const tempFanOff = 		        device.fanTempOff + 273;
+      const equalisationVoltage =  		device.equalisationVoltage;
+      const absorptionVoltage =    		device.absorptionVoltage;
+      const floatVoltage = 		      	device.floatVoltage;
+      const bulkRecVoltage = 		    	device.recoveryVoltage;
+      const equalisationTime = 		  	device.equalisationTime;
+      const absorptionTime = 		    	device.absorptionTime;
+      const equalisationInterval = 		device.equalisationInterval;
+      const tempFanOn = 		        device.fanTempOn + 273.15;
+      const tempFanOff = 		        device.fanTempOff + 273.15;
       var temperature = 		        null;
-      var settingsState = 		      null;
-      var fanState = 			          false;
-      var errCnt =                  0;
-      var readIntervalId = 		      null;
-      var mpptSettingsArr =		      [0, batteryCapacity, systemVoltage, batteryType, overVoltageThreshold,
+      var settingsState = 		      	null;
+      var fanState = 			        false;
+      var errCnt =                  		0;
+      var readIntervalId = 		      	null;
+      var mpptSettingsArr =		      	[ 0, batteryCapacity, systemVoltage, batteryType, overVoltageThreshold,
                       			        chargingVoltageLimit, device.equalisationVoltage, device.absorptionVoltage, device.floatVoltage,
                        			        device.recoveryVoltage, overDischargeRecVoltage, underVoltageWarning, overDischargeVoltage,
                        			        dischargeLimitVoltage, SoCValue, overDischargeTimeDelay, device.equalisationTime,
                        			        device.absorptionTime, device.equalisationInterval, tempComp ];
 
+// need to have a good look at this (above and below). What is redundant and what might be invalid ...
       plugin.clientList.push({client, ttyId, ttyDevice,
                                     equalisationVoltage, absorptionVoltage, floatVoltage, bulkRecVoltage,
-                                    equalisationTime, absorptionTime,
-                                    equalisationInterval,
-			                              tempFanOn, tempFanOff, fanState, errCnt, 
+                                    equalisationTime, absorptionTime, equalisationInterval, tempFanOn, tempFanOff, fanState, errCnt,
                                     temperature, settingsState, readIntervalId, mpptSettingsArr})
     }) //devices.forEach ...
 
     sleep(2000) // give the usb ports time to be setup by server/os
-      .then(function() {plugin.clientList.forEach(item => {setupController(item) } ) } )
-
-      // need to put this below in a separate function ...
-      // also need to revisit the properties of the devices/controllers - do they contain too much?
-
       .then(function() {
-        battCheckIntervalID = setInterval(function() {
-//          app.debug("tailVoltageAve, tailCurrentAve, inFloatMode, batteryAbsVoltage, floatResetVoltage")
-//          app.debug(tailVoltageAve + " " + tailCurrentAve + " " + inFloatMode + " " + batteryAbsVoltage + " " + floatResetVoltage )
-          // check the average from the arrays to determine the status of batteries i.e - absorption/float
-          if ( (!inFloatMode) && (tailVoltageAve > batteryAbsVoltage) && (tailCurrentAve < tailCurrent) ) {
-            app.debug("Set to float mode")
-            inFloatMode = true;
-            // set the float voltage registers accordingly ...
-//            plugin.clientList.forEach(item => {setupControllerVoltage(item, true)}) // use the item properties for the voltages
-          } 
-          
-          if ( (inFloatMode) && (tailVoltageAve <= floatResetVoltage) ) {
-            inFloatMode = false;
-            app.debug("Set to absorption mode")
-            // set the float voltage registers accordingly ...
-//            plugin.clientList.forEach(item => {setupControllerVoltage(item, false)}) // use the item properties for the voltages
-          }
-        }, battStateCheckInterval)
-      })
-      
-    function setupController(item) {
+        plugin.clientList.forEach(controller => {
+          setupController(controller)
+          .then(function() {
+            battCheckIntervalId = setInterval(function() {
+
+              // should never be in float if Voltage is above Abs threshold except when other chargers are controlling
+              // the battery voltage in which case we need to keep trying to set to float by making this variable false
+              if ( (inFloatMode) && (tailVoltageAve > batteryAbsVoltage) )
+                inFloatMode = false;
+
+              if ( (!inFloatMode) && (tailVoltageAve > batteryAbsVoltage) && (tailCurrentAve < tailCurrent) ) {
+                plugin.clientList.forEach(controller => {setControllerVoltage(controller, controller.floatVoltage)})
+                inFloatMode = true;
+              }
+
+              if ( (inFloatMode) && (tailVoltageAve <= floatResetVoltage) ) {
+                plugin.clientList.forEach(item => {setControllerVoltage(controller, controller.absorptionVoltage)})
+                inFloatMode = false;
+              }
+            }, battStateCheckInterval)
+          })  //.then
+        })  //plugin.clientlist
+      })  //.then
+
+    function setupController(controller) {
        return new Promise(function(resolve, reject) {
-            app.debug("Connecting to " + item.ttyDevice)
-            item.settingsState = false;
-            item.client.connectRTUBuffered(item.ttyDevice, { baudRate : 9600 })
+            app.debug("Connecting to " + controller.ttyDevice)
+            controller.settingsState = false;
+            controller.client.connectRTUBuffered(controller.ttyDevice, { baudRate : 9600 })
               .then(function() {
-                item.client.setID(1)
-                item.client.setTimeout(timeout)
-                app.debug("Connected to " + item.ttyId)
+                controller.client.setID(1)
+                controller.client.setTimeout(timeout)
+                app.debug("Connected to " + controller.ttyId)
                })
               .then(function() {
-                readControllerState(item)  // sets item.settingsState = true or false
+                readControllerState(controller)  // sets item.settingsState = true or false
                 .then(function() {
-                  if ( item.settingsState == false) {
-                    setController(item)
+                  if (controller.settingsState == false) {
+                    updateController(controller)
                     .catch(function (e) {
-                      app.debug("Error in setController function, check the settings for " + item.ttyId )
+                      app.debug("Error in updateController function, check the settings for " + controller.ttyId )
                       reject(e)
                     })
                   }
                   else {
-                   app.debug("Settings are correct on " + item.ttyId)
+                   app.debug("No update required on " + controller.ttyId)
                   }
                 }) // .then
                 .then(function() {
-                  startReading(item) 
-                  resolve()
+		    setControllerVoltage(controller, controller.absorptionVoltage)
+                    sleep(1000)
+                    .then(function() {
+                      startReading(controller)
+                      resolve()
+                    })
                 })
                 .catch(function(e) {
-                  app.debug("Error in readControllerState function, resetting controller " + item.ttyId)
-                  app.setPluginError("Resetting " + item.ttyId + " for error " + e.message)
-                  resetController(item)
+                  app.debug("Error in readControllerState function, resetting controller " + controller.ttyId)
+                  app.setPluginError("Resetting " + controller.ttyId + " for error " + e.message)
+                  resetController(controller)
                 })
               })
               .catch(function(e) {
-                app.setPluginError(item.ttyId + " ConnectRTU failed " + e.message)
-                app.debug(item.ttyId + " ConnectRTU failed " + e.message)
-                resetController(item)
+                app.setPluginError(controller.ttyId + " ConnectRTU failed " + e.message)
+                app.debug(controller.ttyId + " ConnectRTU failed " + e.message)
+                resetController(controller)
               })
           resolve()
        }) // return promise
     } //function setupControllers
 
-    function readControllerState(item) { // false when the controllersettings don't match user settings
+    function updateController(controller) {
+      return new Promise(function(resolve, reject) {
+        app.debug("About to update settings on " + controller.ttyId  )
+        controller.client.writeRegisters(eepromBaseAddr, controller.mpptSettingsArr)
+          .then(function() {
+            app.debug( "Settings updated on " + controller.ttyId )
+            app.setPluginStatus( "Settings updated on " + controller.ttyId )
+            inFloatMode = false;
+            sleep(1000)
+            .then(function() { resolve() } )
+          }) //.then
+          .catch(function(e) {
+            app.setPluginError(controller.ttyId + " updateController " + e.message)
+            app.debug(controller.ttyId + " updateController " + e.message)
+            reject(e)
+          }) //catch
+      }) // new Promise
+    }
+
+    function setControllerVoltage(controller, voltage) {
+      return new Promise(function(resolve, reject) {
+        stopReading(controller)
+        .then(function() {
+          controller.client.writeRegisters(absVoltAddr, [voltage, voltage])
+            .then(function() {
+              app.debug( "Voltage set on " + controller.ttyId + " to " + voltage)
+              app.setPluginStatus( "Voltage set on " + controller.ttyId + " to " + voltage)
+              sleep(1000)
+              .then(function() {
+                startReading(controller)
+                resolve()
+              })
+            }) //.then
+            .catch(function(e) {
+              app.setPluginError(controller.ttyId + " setControllerVoltage error: " + e.message)
+              app.debug(controller.ttyId + " setControllerVoltage error: " + e.message)
+              startReading(controller)
+              reject(e)
+            }) //catch
+          })
+      }) // new Promise
+    } // function
+
+    function readControllerState(controller) { // false when the controllersettings don't match user settings
       return new Promise(function (resolve, reject) {
-        app.debug("Reading settings from " + item.ttyId)
-        item.settingsState = true
-        item.client.readHoldingRegisters(eepromBaseAddr, item.mpptSettingsArr.length)
+        app.debug("Reading settings from " + controller.ttyId)
+        controller.settingsState = true
+        controller.client.readHoldingRegisters(eepromBaseAddr, controller.mpptSettingsArr.length)
           .then(function(d) {
             var itr = 0
-            while ( (itr < item.mpptSettingsArr.length) && (d !== null) ) {
-              if ( d.data[itr] != item.mpptSettingsArr[itr] ) { item.settingsState = false } // are settings current?
+            while ( (itr < controller.mpptSettingsArr.length) && (d !== null) ) {
+              if ( d.data[itr] != controller.mpptSettingsArr[itr] ) { controller.settingsState = false } // are settings current?
                 itr++
             } // while
             resolve()
           }) //.then
           .catch(function(e) {
-            app.setPluginError("Error in readHoldingRegisters " + item.ttyId + " " +  e.message)
-            app.debug("Error in readHoldingRegisters " + item.ttyId + " " + e.message)
+            app.setPluginError("Error in readHoldingRegisters " + controller.ttyId + " " +  e.message)
+            app.debug("Error in readHoldingRegisters " + controller.ttyId + " " + e.message)
             reject(e)
           }) //.catch
       }) // new promise
     }  //readControllerState
 
-    function setController(item) {
-      return new Promise(function(resolve, reject) {
-        app.debug("About to update settings on " + item.ttyId  )
-        item.client.writeRegisters(eepromBaseAddr, item.mpptSettingsArr)
-          .then(function() {
-            app.debug( "Settings updated on " + item.ttyId )
-            app.setPluginStatus( "Settings updated on " + item.ttyId )
-            inFloatMode = false;
-            resolve()
-          }) //.then
-          .catch(function(e) {
-            app.setPluginError(item.ttyId + " setController " + e.message)
-            app.debug(item.ttyId + " setController " + e.message)
-            reject(e)
-          }) //catch
-      }) // new Promise
-    }
- 
-    function setControllerVoltage(item) {
-      return new Promise(function(resolve, reject) {
-        app.debug("About to update float/abs settings on " + item.ttyId  )
-        item.client.writeRegisters(eepromBaseAddr, item.mpptSettingsArr)
-          .then(function() {
-            app.debug( "Settings updated on " + item.ttyId )
-            app.setPluginStatus( "Settings updated on " + item.ttyId )
-            resolve()
-          }) //.then
-          .catch(function(e) {
-            app.setPluginError(item.ttyId + " setController " + e.message)
-            app.debug(item.ttyId + " setController " + e.message)
-            reject(e)
-          }) //catch
-      }) // new Promise
-    }
- 
-
-    function resetController(item) {
+    function resetController(controller) {
       return new Promise(function(resolve) {
-        item.errCnt = 0
-        app.debug("controller reset - " + item.ttyId)
-        stopReading(item) // includes delay
+        controller.errCnt = 0
+        app.debug("controller reset - " + controller.ttyId)
+        stopReading(controller) // includes delay
         .then(function() {
-          item.client.close() 
-          setupController(item)
+          controller.client.close()
+          setupController(controller)
           resolve()
-        })        
+        })
       })
     }
 
-    function stopReading(item) {
+    function stopReading(controller) {
       return new Promise(function(resolve) {
-        clearInterval(item.readIntervalId); // stop the read events
-        app.debug("Reading suspended for " + item.ttyId)
+        if (controller.readIntervalId != null)
+          clearInterval(controller.readIntervalId); // stop the read events
+//        app.debug("Reading suspended for " + item.ttyId)
         sleep(1000)
         .then(function() { resolve() } )
       })
     }
 
-    function startReading(item) {
+    function startReading(controller) {
       // Read the data from the controller (registers) every second
+      // First make sure one doesn't already exist
+        if (controller.readIntervalId != null)
+          clearInterval(controller.readIntervalId);
+
       return new Promise(function(resolve) {
-        item.readIntervalId = setInterval(function() {
-            item.client.readHoldingRegisters(readAddress, 33)
+        controller.readIntervalId = setInterval(function() {
+            controller.client.readHoldingRegisters(readAddress, 33)
               .then(function(data) {
                 if ( (data  != undefined ) && (data  != null) ) {
-                    var delta = getDelta(data, item.ttyId)
+                    var delta = getDelta(data, controller.ttyId)
                     app.setPluginStatus("Reading MPPT Data")
-                    item.errCnt = 0
+                    controller.errCnt = 0
                     app.handleMessage(PLUGIN_ID, delta)
                 } // if
               }) // .then(function(data) ...
               .catch(function(e) {
-                app.setPluginError(e.message + " " + item.ttyId +  " in main readHoldingRegisters" )
-                ++item.errCnt
-                if( item.errCnt > maxReadErrCnt) {
-                  resetController(item)
+                ++controller.errCnt
+                app.setPluginError(e.message + " " + controller.ttyId +  " in main readHoldingRegisters" )
+                app.debug(e.message + " " + controller.ttyId +  " in main readHoldingRegisters" )
+                if( controller.errCnt > maxReadErrCnt) {
+                  resetController(controller)
                 }
               })
               resolve()
         }, 1000) // readIntervalID
       }) // new Promise
     } //startReading
- 
+
     // define the chargerTemp delta to be returned by the subs manager
     let mppt_Info = {
       context: "vessels.self",
@@ -293,7 +317,7 @@ module.exports = function(app) {
         period: 5000
       }]
     }
-  
+
     app.subscriptionmanager.subscribe ( mppt_Info, onStop, subscription_error, delta => {
       plugin.clientList.forEach ( item => {
         const ttyId = item.ttyId
@@ -332,8 +356,8 @@ module.exports = function(app) {
             const val = value.value
             if ( path.endsWith ('.current') || path.endsWith ('.voltage')  ) {
             // dont want this to run for every delta - only the ones we are interesting in
-              if ( path.endsWith ('.current' ) ) { 
-                //  add to current array 
+              if ( path.endsWith ('.current' ) ) {
+                //  add to current array
                 currentArr.unshift(val)
                 tailCurrentTotal += val
                 if (currentArr.length > arrSize) {
@@ -353,25 +377,25 @@ module.exports = function(app) {
                 }
                 tailVoltageAve = (tailVoltageTotal / voltageArr.length)
               }
+
             } // if path.endsWith ....
           }) // update.values ...
         }) // delta.updates ...
     })  //subsmanager
 
-    
     function switchFans(item, on_off) {
       return new Promise( function(resolve, reject) {
-        app.debug("Switch fans routine called - " + item.ttyId)
+//        app.debug("Switch fans routine called - " + item.ttyId)
         stopReading(item)
         .then( function () {
-          app.debug( "'Switch fans' writeRegister " + item.ttyId )
+          app.debug( "Fan switched to " + on_off + " on "+ item.ttyId )
           item.client.writeRegister( load_on_offAddr, on_off)
             .catch(function(e) {
               app.debug(e.message + " " + item.ttyId + " from switchFans()" )
-              app.setPluginError(e.message + " " + item.ttyId +  " from switchFans()" ) 
+              app.setPluginError(e.message + " " + item.ttyId +  " from switchFans()" )
             })
           }) // .then(function() ...
-        .then(function() { 
+        .then(function() {
           startReading(item)
           resolve()
         })
@@ -379,16 +403,15 @@ module.exports = function(app) {
     };
 
     function sleep(duration) {
-      app.debug("Sleeping for " + duration + "ms")
+//      app.debug("Sleeping for " + duration + "ms")
       return new Promise(function(resolve) {
           setTimeout(function() {
               resolve();
           }, duration);
       });
     }
-  
 
-     
+
   }; //plugin start
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -398,7 +421,7 @@ module.exports = function(app) {
       clearInterval(item.readIntervalId); // stop the read events
       if (item.client.isOpen) { item.client.close() } // close the serial ports
     })
- 
+
     clearInterval(battCheckIntervalId);
 
     onStop.forEach(f => f());
@@ -421,7 +444,7 @@ module.exports = function(app) {
         type: 'number',
         title: 'Battery absorption voltage (V)',
 	      description: 'This is the voltage at which the batteries are considered to be in the absorption phase',
-        default: 14.8},
+        default: 14.3},
 
       tailCurrent: {
       	type: 'number',
@@ -439,7 +462,7 @@ module.exports = function(app) {
         type: 'number',
         title: 'Float reset voltage (V)',
         description: 'This is the battery voltage below which the Absorption voltage setting is reset back to Absorption from Float voltage)',
-        default: 12.8
+        default: 12.6
       },
 
       devices: {
@@ -470,19 +493,19 @@ module.exports = function(app) {
               type: 'number',
               title: 'Absorption Voltage (V x10)',
               description: 'This is the Absorption Charge Voltage setting',
-              default: 148
+              default: 141
             },
 	    floatVoltage: {
               type: 'number',
               title: 'Float Voltage (V x10)',
               description: 'This is the Float Charge Voltage setting',
-              default: 138
+              default: 136
             },
   	    recoveryVoltage: {
               type: 'number',
               title: 'Bulk Recovery Voltage (V x10)',
               description: 'This is the voltage threshold below which the charger reverts to Bulk Charging mode',
-              default: 128
+              default: 127
             },
       	    equalisationInterval: {
               type: 'number',
